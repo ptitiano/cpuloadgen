@@ -66,11 +66,11 @@ Usage:
 
 cpuloadgen [cpu0load] [cpu1load] [duration]
 
-  cpu0load: CPU load to be generated on CPU0 (in %) [1-100]
+cpu0load: CPU load to be generated on CPU0 (in %) [1-100]
 
-  cpu1load: CPU load to be generated on CPU1 (in %) [1-100]
+cpu1load: CPU load to be generated on CPU1 (in %) [1-100]
 
-  duration: test duration (in seconds) [0-600]
+duration: test duration (in seconds) [0-600]
 
 If duration is omitted, then it runs until CTRL+C is pressed.
 
