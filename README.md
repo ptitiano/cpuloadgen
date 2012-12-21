@@ -65,12 +65,17 @@ Usage:
 -----
 
 cpuloadgen [cpu0load] [cpu1load] [duration]
+
   cpu0load: CPU load to be generated on CPU0 (in %) [1-100]
+
   cpu1load: CPU load to be generated on CPU1 (in %) [1-100]
+
   duration: test duration (in seconds) [0-600]
 
 If duration is omitted, then it runs until CTRL+C is pressed.
+
 If duration & cpu1load are omitted, then it generates cpu0load load on any
 available CPU until CTRL+C is pressed (no affinity, scheduler runtime decision).
+
 If all options are omitted, then it runs until CTRL+C is pressed with
 a 100% CPU Load on each core.
