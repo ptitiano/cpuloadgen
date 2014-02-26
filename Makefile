@@ -43,7 +43,7 @@
 
 
 CC = $(CROSS_COMPILE)gcc
-MYCFLAGS += -Wall -static
+MYCFLAGS += -Wall -static -pthread
 DESTDIR = ./out
 
 objects = cpuloadgen.o timers_b.o dhry_21b.o

@@ -54,9 +54,10 @@
 #define __USE_GNU
 #include <sched.h>
 #include <signal.h>
+#include <errno.h>
+#include <pthread.h>
 
-
-#define CPULOADGEN_REVISION ((const char *) "0.93")
+#define CPULOADGEN_REVISION ((const char *) "0.94")
 
 
 /* #define DEBUG */
@@ -91,35 +92,68 @@ extern char *builddate;
 extern double dtime();
 
 
-pid_t pid, pid_child;
+int cpu_count = -1;
+int *cpuloads = NULL;
+long int duration = -1;
+pthread_t *threads = NULL;
+pthread_mutex_t mutex1 = PTHREAD_MUTEX_INITIALIZER;
 
 void dhryStone(unsigned int iterations);
-void loadgen(unsigned int cpu, unsigned int load,
-	unsigned int duration, unsigned short int need_cpu_affinity);
-
+void loadgen(unsigned int cpu, unsigned int load, unsigned int duration);
 
 /* ------------------------------------------------------------------------*//**
  * @FUNCTION		usage
  * @BRIEF		Display list of supported commands.
  * @DESCRIPTION		Display list of supported commands.
  *//*------------------------------------------------------------------------ */
-void usage(void)
+static void usage(void)
 {
-	printf("Usage:\n\n");
-	printf(
-		"cpuloadgen [<cpu0load>] [<cpu1load>] [<duration>]\n");
-	printf(
-		"  <cpu0load>: CPU load to be generated on CPU0 (in %%) [1-100]\n");
-	printf(
-		"  <cpu1load>: CPU load to be generated on CPU1 (in %%) [1-100]\n");
-	printf(
-		"  <duration>: test duration (in seconds) [0-600]\n\n");
-	printf(
-		"If <duration> is omitted, then it runs until CTRL+C is pressed.\n\n");
-	printf(
-		"If <duration> & <cpu1load> are omitted, then it generates <cpu0load> load on any available CPU until CTRL+C is pressed (no affinity, scheduler runtime decision).\n\n");
-	printf(
-		"If all options are omitted, then it runs until CTRL+C is pressed with a 100%% CPU Load on each core.\n\n");
+	printf("Usage:\n");
+	printf("\tcpuloadgen [<cpu[n]=load>] [<duration=time>]\n\n");
+	printf("Generate adjustable processing load on selected CPU core(s) for a given duration.\n");
+	printf("Load is a percentage which may be any integer value between 1 and 100.\n");
+	printf("Duration time unit is seconds.\n");
+	printf("Arguments may be provided in any order.\n");
+	printf("If duration is omitted, generate load(s) until CTRL+C is pressed.\n");
+	printf("If no argument is given, generate 100%% load on all online CPU cores indefinitely.\n\n");
+	printf("e.g.:\n");
+	printf(" - Generate 100%% load on all online CPU cores until CTRL+C is pressed:\n");
+	printf("	# cpuloadgen\n");
+	printf(" - Generate 100%% load on all online CPU cores during 10 seconds:\n");
+	printf("	# cpuloadgen duration=10\n");
+	printf(" - Generate 50%% load on CPU1 and 100%% load on CPU3 during 10 seconds:\n");
+	printf("	# cpuloadgen cpu3=100 cpu1=50 duration=5\n\n");
+}
+
+
+/* ------------------------------------------------------------------------*//**
+ * @FUNCTION		free_buffers
+ * @BRIEF		free allocated buffers.
+ * @DESCRIPTION		free allocated buffers.
+ *//*------------------------------------------------------------------------ */
+static void free_buffers(void)
+{
+	if (threads != NULL)
+		free(threads);
+	if (cpuloads != NULL)
+		free(cpuloads);
+}
+
+
+/* ------------------------------------------------------------------------*//**
+ * @FUNCTION		einval
+ * @BRIEF		Display standard message in case of invalid argument.
+ * @RETURNS		-EINVAL
+ * @param[in]		arg: invalid argument
+ * @DESCRIPTION		Display standard message in case of invalid argument.
+ *			Take care of freeing allocated buffers
+ *//*------------------------------------------------------------------------ */
+static int einval(const char *arg)
+{
+	fprintf(stderr, "cpuloadgen: invalid argument!!! (%s)\n\n", arg);
+	usage();
+	free_buffers();
+	return -EINVAL;
 }
 
 
@@ -132,9 +166,38 @@ void usage(void)
  *//*------------------------------------------------------------------------ */
 void sigterm_handler(void)
 {
-	dprintf("%s(): sending SIGTERM signal to child process (PID %d)\n",
-		__func__, pid_child);
-	kill(pid_child, SIGTERM);
+	unsigned int i;
+
+	printf("Halting load generation...\n");
+	fflush(stdout);
+
+	free_buffers();
+
+	printf("done.\n\n");
+	fflush(stdout);
+}
+
+
+/* ------------------------------------------------------------------------*//**
+ * @FUNCTION		thread_loadgen
+ * @BRIEF		pthread wrapper around loadgen() function.
+ * @param[in]		ptr: pointer to the cpu core id
+ * @DESCRIPTION		pthread wrapper around loadgen() function.
+ *//*------------------------------------------------------------------------ */
+void *thread_loadgen(void *ptr)
+{
+	unsigned int cpu;
+
+	cpu = *((unsigned int *) ptr);
+	pthread_mutex_unlock(&mutex1);
+	if (cpu < cpu_count) {
+		loadgen(cpu, cpuloads[cpu], duration);
+	} else {
+		fprintf(stderr, "%s: invalid cpu argument!!! (%d)\n",
+			__func__, cpu);
+	}
+
+	pthread_exit(NULL);
 }
 
 
@@ -142,142 +205,132 @@ void sigterm_handler(void)
  * @FUNCTION		main
  * @BRIEF		main entry point
  * @RETURNS		0 on success
- *			-1 in case of incorrect argument
- *			-2 in case of failure to fork
+ *			-EINVAL in case of invalid argument
+ *			-ECHILD in case of failure to fork
  * @param[in, out]	argc: shell input argument number
  * @param[in, out]	argv: shell input argument(s)
  * @DESCRIPTION		main entry point
  *//*------------------------------------------------------------------------ */
 int main(int argc, char *argv[])
 {
-	unsigned int cpu0load, cpu1load, duration;
-	unsigned short int need_cpu_affinity;
-	int ret;
+	unsigned int cpu0load, cpu1load, cpu2load, cpu3load;
+	int i, ret, n, load;
+	long int duration2;
 
+	/*
+	 * Register signal handler in order to be able to
+	 * kill child process if user kills parent process
+	 */
+	signal(SIGTERM, (sighandler_t) sigterm_handler);
 
 	printf("CPULOADGEN (REV %s built %s)\n\n",
 		CPULOADGEN_REVISION, builddate);
 
-	if ((argc == 1) || (argc > 4)) {
-		usage();
-		return -1;
+	cpu_count = (int) sysconf(_SC_NPROCESSORS_ONLN);
+	if (cpu_count < 1) {
+		fprintf(stderr, "cpuloadgen: could not determine CPU cores count!!! (%d)\n",
+			cpu_count);
+		return cpu_count;
 	}
+	dprintf("main: found %d CPU cores.\n", cpu_count);
 
-	need_cpu_affinity = 1;
-	cpu0load = 100;
-	cpu1load = 100;
-	duration = 0;
-
-	if (argc == 4) {
-		ret = sscanf(argv[1], "%d", &cpu0load);
-		if (ret != 1) {
-			usage();
-			return -1;
-		}
-		ret = sscanf(argv[2], "%d", &cpu1load);
-		if (ret != 1) {
-			usage();
-			return -1;
-		}
-		ret = sscanf(argv[3], "%d", &duration);
-		if (ret != 1) {
-			usage();
-			return -1;
-		}
-	} else if (argc == 3) {
-		ret = sscanf(argv[1], "%d", &cpu0load);
-		if (ret != 1) {
-			usage();
-			return -1;
-		}
-		ret = sscanf(argv[2], "%d", &cpu1load);
-		if (ret != 1) {
-			usage();
-			return -1;
-		}
-	} else if (argc == 2) {
-		dprintf("%s(): argc == 2\n", __func__);
-		ret = sscanf(argv[1], "%d", &cpu0load);
-		if (ret != 1) {
-			usage();
-			return -1;
-		}
-		dprintf("in case of need_cpu_affinity = 0\n", __func__);
-		need_cpu_affinity = 0;
-		cpu1load = 0;
+	/* Allocate buffers */
+	threads = malloc(cpu_count * sizeof(pthread_t));
+	cpuloads = malloc(cpu_count * sizeof(int));
+	if ((threads == NULL) || (cpuloads == NULL)) {
+		fprintf(stderr, "cpuloadgen: could not allocate buffers!!!\n");
+		return -ENOMEM;
 	}
-
-	if (duration > 600) {
-		printf("Incorrect duration (%d)!\n\n", duration);
-		usage();
-		return -1;
-	}
-	if (cpu0load > 100) {
-		printf("Incorrect CPU0 Load (%d)!\n\n", cpu0load);
-		usage();
-		return -1;
-	}
-	if (cpu1load > 100) {
-		printf("Incorrect CPU1 Load (%d)!\n\n", cpu1load);
-		usage();
-		return -1;
-	}
-	if ((cpu0load == 0) && (cpu1load == 0)) {
-		printf("Nothing to do!\n");
-		return -1;
-	}
-
-	if (need_cpu_affinity == 1) {
-		printf("CPU0 Load to generate: %d%%\n", cpu0load);
-		printf("CPU1 Load to generate: %d%%\n", cpu1load);
+	/* Initialize variables */
+	if (argc == 1) {
+		/* No user arguments, use default */
+		for (i = 0; i < cpu_count; i++) {
+			threads[i] = -1;
+			cpuloads[i] = 100;
+		}
+		duration = -1;
 	} else {
-		printf("CPU Load to generate: %d%%\n", cpu0load);
-	}
-
-	if (duration != 0)
-		printf("Duration: %ds\n\n", duration);
-	else
-		printf("Press CTRL+C to end\n\n");
-
-	if ((cpu0load != 0) && (cpu1load != 0)) {
-		/* need to create 2 processes, 1 per CPU core */
-		pid = fork();
-		if (pid < 0) {
-			/* failed to fork */
-			fprintf(stderr, "%s(): Failed to fork!\n (%d)",
-				__func__, pid);
-			return -2;
-		} else if (pid == 0) {
-			/* Child Process => CPU1 task */
-			dprintf("%s(): this is the child process (PID=%d)\n",
-				__func__, getpid());
-			/* Generate requested load on CPU1 */
-			loadgen(1, cpu1load, duration, need_cpu_affinity);
-		} else {
-			/* Parent Process => CPU0 task */
-			pid_child = pid;
-			dprintf(
-				"%s(): this is the parent process (PID = %d). Child process PID is %d\n",
-				__func__, getpid(), pid_child);
-			/*
-			 * Register signal handler in order to be able to
-			 * kill child process if user kills parent process
-			 */
-			signal(SIGTERM, (sighandler_t) sigterm_handler);
-			/* Generate requested load on CPU0 */
-			loadgen(0, cpu0load, duration, need_cpu_affinity);
-			/*
-			 * Parent process completes,
-			 * kill child process before returning
-			 */
-			kill(pid_child, SIGTERM);
+		for (i = 0; i < cpu_count; i++) {
+			threads[i] = -1;
+			cpuloads[i] = -1;
 		}
-	} else if (cpu1load != 0) {
-		loadgen(1, cpu1load, duration, need_cpu_affinity);
-	} else { /* (cpu0load != 0) */
-		loadgen(0, cpu0load, duration, need_cpu_affinity);
+		duration = -1;
+
+		/* Parse arguments */
+		for (i = 1; i < argc; i++) {
+			dprintf("main: argv[i]=%s\n", argv[i]);
+			if (argv[i][0] == 'c') {
+				ret = sscanf(argv[i], "cpu%d=%d", &n, &load);
+				if ((ret != 2) ||
+					((n < 0) || (n >= cpu_count)) ||
+					((load < 1) || (load > 100)))
+					return einval(argv[i]);
+				if (cpuloads[n] != -1) {
+					fprintf(stderr,
+						"cpuloadgen: CPU%d was already assigned a load of %d!\n\n",
+						n, cpuloads[n]);
+					free_buffers();
+					return -EINVAL;
+				}
+				cpuloads[n] = load;
+				dprintf("Load assigned to CPU%d: %d%%\n",
+					n, cpuloads[n]);
+			} else if (argv[i][0] == 'd') {
+				ret = sscanf(argv[i], "duration=%ld",
+					&duration2);
+				if ((ret != 1) || (duration2 < 1)) {
+					return einval(argv[i]);
+				}
+				if (duration != -1) {
+					fprintf(stderr,
+						"cpuloadgen: duration was already set to %ld!\n\n",
+						duration);
+					free_buffers();
+					return -EINVAL;
+				}
+				duration = duration2;
+				dprintf("Duration of the load generation: %lds\n",
+					duration);
+			} else {
+				return einval(argv[i]);
+			}
+		}
 	}
 
+	printf("Press CTRL+C to stop load generation at any time.\n\n");
+
+	/* Start load generation on cores accordingly */
+	for (i = 0; i < cpu_count; i++) {
+		if (cpuloads[i] == -1) {
+			dprintf("main: no load to be generated on CPU%d\n", i);
+			continue;
+		}
+		/*
+		 * Why is a mutex needed here?
+		 * There is a race condition between this loop which updates
+		 * variable i and thread_loadgen() which also reads it.
+		 * Hence locking a mutex here, and unlocking it in
+		 * thread_loadgen() after the value was retrieved and saved.
+		 */
+		pthread_mutex_lock(&mutex1);
+		ret = pthread_create(&threads[i], NULL, thread_loadgen, &i);
+		if (ret != 0) {
+			fprintf(stderr, "cpuloadgen: failed to fork %d! (%d)",
+			i, ret);
+			continue;
+		}
+	}
+
+	for (i = 0; i < cpu_count; i++) {
+		if (cpuloads[i] == -1) {
+			continue;
+		}
+		pthread_join(threads[i], NULL);
+	}
+
+	free_buffers();
+
+	printf("\ndone.\n\n");
 	return 0;
 }
 
@@ -293,15 +346,12 @@ int main(int argc, char *argv[])
  * @param[in]		load: load to generate on that CPU ([1-100])
  * @param[in]		duration: how long this CPU core shall be loaded
  *				(in seconds)
- * @param[in]		need_cpu_affinity: flag to be set when affinity shall be
- *				used.
  * @DESCRIPTION		Programmable CPU load generator. Use Dhrystone loops
  *			to generate load, and apply PWM (Pulse Width Modulation)
  *			principle on it to make average CPU load vary between
  *			0 and 100%
  *//*------------------------------------------------------------------------ */
-void loadgen(unsigned int cpu, unsigned int load,
-	unsigned int duration, unsigned short int need_cpu_affinity)
+void loadgen(unsigned int cpu, unsigned int load, unsigned int duration)
 {
 	double dhrystone_start_time, dhrystone_end_time;
 	double idle_time_us;
@@ -315,17 +365,11 @@ void loadgen(unsigned int cpu, unsigned int load,
 	unsigned int len = sizeof(mask);
 	cpu_set_t set;
 
-	if (need_cpu_affinity == 1) {
-		CPU_ZERO(&set);
-		if (cpu == 0)
-			CPU_SET(0, &set);
-		else
-			CPU_SET(1, &set);
-		sched_setaffinity(0, len, &set);
-		printf("Generating Load on CPU%d...\n", cpu);
-	} else {
-		printf("Generating Load ...\n");
-	}
+	CPU_ZERO(&set);
+	CPU_SET(cpu, &set);
+	sched_setaffinity(0, len, &set);
+	printf("Generating %3d%% load on CPU%d...\n", load, cpu);
+
 	gettimeofday(&tv_cpuloadgen_start, &tz);
 	loadgen_start_time_us = ((double) tv_cpuloadgen_start.tv_sec
 		+ ((double) tv_cpuloadgen_start.tv_usec * 1.0e-6));
@@ -344,13 +388,13 @@ void loadgen(unsigned int cpu, unsigned int load,
 				cpu, (unsigned int) active_time_us);
 
 			/* Compute needed idle time */
-			idle_time_us = total_time_us - active_time_us;
-			dprintf("%s(): CPU%d computed idle_time_us = %dus\n",
-				__func__, cpu, (unsigned int) idle_time_us);
 			total_time_us =
 				active_time_us * (100.0 / (double) (load + 1));
 			dprintf("%s(): CPU%d total time: %dus\n", __func__, cpu,
 				(unsigned int) total_time_us);
+			idle_time_us = total_time_us - active_time_us;
+			dprintf("%s(): CPU%d computed idle_time_us = %dus\n",
+				__func__, cpu, (unsigned int) idle_time_us);
 
 			/* Generate idle time */
 			#ifdef DEBUG
@@ -377,8 +421,8 @@ void loadgen(unsigned int cpu, unsigned int load,
 			dprintf("%s(): CPU%d elapsed time: %fs\n",
 				__func__, cpu,
 				time_us - loadgen_start_time_us);
-			if ((duration != 0)
-				&& (time_us - loadgen_start_time_us) >= duration)
+			if ((duration != 0) &&
+				(time_us - loadgen_start_time_us) >= duration)
 				break;
 		}
 	} else {
@@ -389,13 +433,13 @@ void loadgen(unsigned int cpu, unsigned int load,
 				+ ((double) tv_cpuloadgen.tv_usec * 1.0e-6));
 			dprintf("%s(): CPU%d elapsed time: %fs\n", __func__,
 				cpu, time_us - loadgen_start_time_us);
-			if ((duration != 0)
-				&& (time_us - loadgen_start_time_us) >= duration)
+			if ((duration != 0) &&
+				(time_us - loadgen_start_time_us) >= duration)
 				break;
 		}
 	}
 
-	printf("Load Generation on CPU%d stopped.\n", cpu);
+	dprintf("Load Generation on CPU%d completed.\n", cpu);
 }
 
 
@@ -458,7 +502,8 @@ void dhryStone(unsigned int iterations)
 			if (Enum_Loc == Func_1 (Ch_Index, 'C')) {
 				/* then, not executed */
 				Proc_6 (Ident_1, &Enum_Loc);
-				strcpy (Str_2_Loc, "DHRYSTONE PROGRAM, 3'RD STRING");
+				strcpy (Str_2_Loc,
+					"DHRYSTONE PROGRAM, 3'RD STRING");
 				Int_2_Loc = Run_Index;
 				Int_Glob = Run_Index;
 			}
