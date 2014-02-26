@@ -29,16 +29,22 @@ TEXAS INSTRUMENTS INCORPORATED.
 Build instructions:
 -------------------
 To only build the output binary file:
+
 	# make cpuloadgen
 
 NB: CROSS_COMPILE variable must be set to point to the correct compiler.
+
 E.g: (for ARM architecture)
+
 	# export CROSS_COMPILE=arm-none-linux-gnueabi-
+
 or
+
 	# make CROSS_COMPILE=arm-none-linux-gnueabi- cpuloadgen
 
 
 To build and install cpuloadgen:
+
 	# make DESTDIR=<YOUR_DIR> install
 
 Where "YOUR_DIR" is a destination directory where cpuloadgen output binary file
@@ -52,18 +58,24 @@ Usage:
 	# cpuloadgen [<cpu[n]=load>] [<duration=time>]
 
 Load is a percentage which may be any integer value between 1 and 100.
+
 Duration time unit is seconds. If duration is omitted, generate load(s) until
 CTRL+C is pressed.
 
 Arguments may be provided in any order.
+
 If no argument is given, generate 100% load on all online CPU cores
 indefinitely.
 
 E.g.:
  - Generate 100% load on all online CPU cores until CTRL+C is pressed:
-	# cpuloadgen
- - Generate 100% load on all online CPU cores during 10 seconds:
-	# cpuloadgen duration=10
- - Generate 50% load on CPU1 and 100% load on CPU3 during 10 seconds:
-	# cpuloadgen cpu3=100 cpu1=50 duration=5
 
+	# cpuloadgen
+
+ - Generate 100% load on all online CPU cores during 10 seconds:
+
+	# cpuloadgen duration=10
+
+ - Generate 50% load on CPU1 and 100% load on CPU3 during 10 seconds:
+
+	# cpuloadgen cpu3=100 cpu1=50 duration=5
