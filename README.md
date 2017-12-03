@@ -76,6 +76,6 @@ Generate 100% load on all online CPU cores during 10 seconds:
 
 	# cpuloadgen duration=10
 
-Generate 50% load on CPU1 and 100% load on CPU3 during 10 seconds:
+Generate 50% load on CPU1 and 100% load on CPU3 during 5 seconds:
 
 	# cpuloadgen cpu3=100 cpu1=50 duration=5
